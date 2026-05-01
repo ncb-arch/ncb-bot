@@ -1,24 +1,65 @@
 import os
-import sys
 import json
 import base64
 import requests
+import gspread
 from flask import Flask, request
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-NOTION_TOKEN   = os.environ.get("NOTION_TOKEN", "")
-NOTION_DB_ID   = os.environ.get("NOTION_DB_ID", "")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
+GOOGLE_CREDS   = os.environ.get("GOOGLE_CREDS", "")
 
 TELEGRAM_API = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
 
 print("Bot starting...", flush=True)
 print("TOKEN set:", bool(TELEGRAM_TOKEN), flush=True)
 print("CLAUDE set:", bool(CLAUDE_API_KEY), flush=True)
-print("NOTION set:", bool(NOTION_TOKEN), flush=True)
+print("SHEETS set:", bool(SPREADSHEET_ID), flush=True)
+print("CREDS set:", bool(GOOGLE_CREDS), flush=True)
+
+# Sheet routing by doc type
+SHEET_MAP = {
+    "DELIVERY_CHALLAN":  "Delivery Challans",
+    "WEIGH_SLIP":        "Weighment Slips",
+    "TAX_INVOICE":       "Bharathi Invoices",
+    "PURCHASE_INVOICE":  "Bharathi Invoices",
+    "SALES_INVOICE":     "Bharathi Invoices",
+    "RECEIPT":           "Receipts",
+    "PURCHASE_ORDER":    "Purchase Orders",
+    "CREDIT_NOTE":       "Bharathi Invoices",
+    "DEBIT_NOTE":        "Bharathi Invoices",
+    "OTHER":             "Other Documents",
+}
+
+# Column headers per sheet
+SHEET_HEADERS = {
+    "Delivery Challans": [
+        "Scanned At", "Received From", "Confidence",
+        "Invoice Number", "Invoice Date", "Supplier Name",
+        "Supplier GSTIN", "Buyer Name", "Vehicle Number",
+        "Material", "Quantity TO", "Unit Price",
+        "Basic Amount", "CGST", "SGST", "Total Amount"
+    ],
+    "Weighment Slips": [
+        "Scanned At", "Received From", "Confidence",
+        "RST Number", "Date", "Time",
+        "Vehicle Number", "Material",
+        "Gross Weight Kg", "Tare Weight Kg", "Net Weight Kg"
+    ],
+    "Bharathi Invoices": [
+        "Scanned At", "Received From", "Confidence", "Doc Type",
+        "Invoice Number", "Invoice Date", "Supplier Name",
+        "Supplier GSTIN", "Buyer Name", "Vehicle Number",
+        "Gross Weight Kg", "Tare Weight Kg", "Net Weight Kg",
+        "Material", "Quantity TO", "Unit Price",
+        "Basic Amount", "CGST", "SGST", "Total Amount"
+    ],
+}
 
 DOC_TYPES = {
     "TAX_INVOICE": "Tax Invoice",
@@ -39,12 +80,22 @@ Identify document type from: TAX_INVOICE, DELIVERY_CHALLAN, WEIGH_SLIP, PURCHASE
 SALES_INVOICE, RECEIPT, PURCHASE_ORDER, CREDIT_NOTE, DEBIT_NOTE, OTHER.
 Extract all visible fields like invoice_number, invoice_date, supplier_name, supplier_gstin,
 buyer_name, vehicle_number, gross_weight_kg, tare_weight_kg, net_weight_kg, material,
-quantity_to, unit_price, basic_amount, cgst, sgst, total_amount, rst_number.
+quantity_to, unit_price, basic_amount, cgst, sgst, total_amount, rst_number, date, time.
 Return ONLY this JSON: {"doc_type":"TAX_INVOICE","confidence":"HIGH","fields":{"key":"value"}}"""
 
 
+def get_gspread_client():
+    creds_json = json.loads(GOOGLE_CREDS)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+    return gspread.authorize(creds)
+
+
 def send_message(chat_id, text, parse_mode="Markdown"):
-    print("Sending message to:", chat_id, flush=True)
+    print("Sending to:", chat_id, flush=True)
     try:
         r = requests.post(TELEGRAM_API + "/sendMessage", json={
             "chat_id": chat_id,
@@ -101,112 +152,77 @@ def analyse_with_claude(image_b64):
     return json.loads(raw)
 
 
-def save_to_notion(extracted, from_name):
-    if not NOTION_TOKEN or not NOTION_DB_ID:
-        print("Notion not configured", flush=True)
+def save_to_sheets(extracted, from_name):
+    if not SPREADSHEET_ID or not GOOGLE_CREDS:
+        print("Sheets not configured", flush=True)
         return False
-
-    label = DOC_TYPES.get(extracted["doc_type"], extracted["doc_type"])
-    fields = extracted.get("fields", {})
-
-    # Build title from best available field
-    title = (
-        fields.get("invoice_number") or
-        fields.get("rst_number") or
-        fields.get("vehicle_number") or
-        label + " - " + datetime.now().strftime("%d/%m/%Y %H:%M")
-    )
-
-    # Core properties
-    properties = {
-        "Name": {
-            "title": [{"text": {"content": str(title)}}]
-        },
-        "Doc Type": {
-            "select": {"name": label}
-        },
-        "Confidence": {
-            "select": {"name": extracted.get("confidence", "MEDIUM")}
-        },
-        "Received From": {
-            "rich_text": [{"text": {"content": from_name}}]
-        },
-        "Scanned At": {
-            "date": {"start": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
-        }
-    }
-
-    # Add extracted fields as rich_text properties
-    # Map common fields to Notion properties
-    field_map = {
-        "invoice_number":   "Invoice Number",
-        "invoice_date":     "Invoice Date",
-        "supplier_name":    "Supplier",
-        "buyer_name":       "Buyer",
-        "vehicle_number":   "Vehicle Number",
-        "net_weight_kg":    "Net Weight (Kg)",
-        "gross_weight_kg":  "Gross Weight (Kg)",
-        "tare_weight_kg":   "Tare Weight (Kg)",
-        "total_amount":     "Total Amount",
-        "basic_amount":     "Basic Amount",
-        "cgst":             "CGST",
-        "sgst":             "SGST",
-        "material":         "Material",
-        "rst_number":       "RST Number",
-        "quantity_to":      "Quantity (TO)",
-        "supplier_gstin":   "Supplier GSTIN",
-    }
-
-    for field_key, notion_key in field_map.items():
-        if field_key in fields and fields[field_key]:
-            properties[notion_key] = {
-                "rich_text": [{"text": {"content": str(fields[field_key])}}]
-            }
-
-    # Add any remaining fields as a notes block
-    extra = {k: v for k, v in fields.items() if k not in field_map}
-
-    payload = {
-        "parent": {"database_id": NOTION_DB_ID},
-        "properties": properties
-    }
-
-    # Add extra fields as page content
-    if extra:
-        payload["children"] = [{
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {
-                "rich_text": [{
-                    "text": {
-                        "content": "Additional fields:\n" + "\n".join(
-                            k.replace("_", " ").title() + ": " + str(v)
-                            for k, v in extra.items()
-                        )
-                    }
-                }]
-            }
-        }]
-
     try:
-        res = requests.post(
-            "https://api.notion.com/v1/pages",
-            headers={
-                "Authorization": "Bearer " + NOTION_TOKEN,
-                "Content-Type": "application/json",
-                "Notion-Version": "2022-06-28"
-            },
-            json=payload,
-            timeout=15
-        )
-        print("Notion response:", res.status_code, flush=True)
-        if res.status_code == 200:
-            return True
+        gc = get_gspread_client()
+        spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+        doc_type = extracted.get("doc_type", "OTHER")
+        sheet_name = SHEET_MAP.get(doc_type, "Other Documents")
+        fields = extracted.get("fields", {})
+        ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        # Get or create the sheet tab
+        try:
+            sheet = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=26)
+            # Add headers
+            headers = SHEET_HEADERS.get(sheet_name, ["Scanned At", "Received From", "Doc Type", "Confidence"])
+            sheet.append_row(headers)
+            # Format header row
+            sheet.format("1:1", {
+                "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
+                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
+            })
+
+        # Build row based on sheet headers
+        headers = SHEET_HEADERS.get(sheet_name, [])
+        if headers:
+            # Map field names to header names
+            field_to_header = {
+                "invoice_number": "Invoice Number",
+                "invoice_date":   "Invoice Date",
+                "supplier_name":  "Supplier Name",
+                "supplier_gstin": "Supplier GSTIN",
+                "buyer_name":     "Buyer Name",
+                "vehicle_number": "Vehicle Number",
+                "gross_weight_kg":"Gross Weight Kg",
+                "tare_weight_kg": "Tare Weight Kg",
+                "net_weight_kg":  "Net Weight Kg",
+                "material":       "Material",
+                "quantity_to":    "Quantity TO",
+                "unit_price":     "Unit Price",
+                "basic_amount":   "Basic Amount",
+                "cgst":           "CGST",
+                "sgst":           "SGST",
+                "total_amount":   "Total Amount",
+                "rst_number":     "RST Number",
+                "date":           "Date",
+                "time":           "Time",
+            }
+            # Build lookup by header name
+            data_map = {
+                "Scanned At":    ts,
+                "Received From": from_name,
+                "Confidence":    extracted.get("confidence", ""),
+                "Doc Type":      DOC_TYPES.get(doc_type, doc_type),
+            }
+            for field_key, header_name in field_to_header.items():
+                if field_key in fields:
+                    data_map[header_name] = str(fields[field_key])
+
+            row = [data_map.get(h, "") for h in headers]
         else:
-            print("Notion error:", res.text[:300], flush=True)
-            return False
+            row = [ts, from_name, DOC_TYPES.get(doc_type, doc_type), extracted.get("confidence", "")] + list(fields.values())
+
+        sheet.append_row(row)
+        print("Saved to sheet:", sheet_name, flush=True)
+        return sheet_name
     except Exception as e:
-        print("Notion exception:", str(e), flush=True)
+        print("Sheets error:", str(e), flush=True)
         return False
 
 
@@ -231,7 +247,10 @@ def format_reply(extracted, saved):
     if len(fields) > 8:
         lines.append("_...and " + str(len(fields)-8) + " more fields_")
     lines.append("")
-    lines.append("✅ Saved to Notion" if saved else "⚠️ Could not save to Notion — check logs")
+    if saved:
+        lines.append("✅ Saved to *" + str(saved) + "* sheet")
+    else:
+        lines.append("⚠️ Could not save to Sheets")
     return "\n".join(lines)
 
 
@@ -244,7 +263,7 @@ def process_image(chat_id, file_id, from_name):
             return
         image_b64 = download_image(file_url)
         extracted = analyse_with_claude(image_b64)
-        saved = save_to_notion(extracted, from_name)
+        saved = save_to_sheets(extracted, from_name)
         reply = format_reply(extracted, saved)
         send_message(chat_id, reply)
     except Exception as e:
@@ -257,7 +276,6 @@ def webhook():
     print("Webhook received!", flush=True)
     try:
         data = request.json
-        print("Data:", json.dumps(data)[:200], flush=True)
         if not data:
             return "ok"
         message = data.get("message", {})
@@ -265,17 +283,14 @@ def webhook():
         from_user = message.get("from", {})
         from_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
         from_name = from_name or from_user.get("username", "Unknown")
-
-        print("Chat ID:", chat_id, "From:", from_name, flush=True)
+        print("From:", from_name, "Chat:", chat_id, flush=True)
 
         if "photo" in message:
-            print("Photo received", flush=True)
             file_id = message["photo"][-1]["file_id"]
             process_image(chat_id, file_id, from_name)
         elif "document" in message:
             doc = message["document"]
-            mime = doc.get("mime_type", "")
-            if mime.startswith("image/"):
+            if doc.get("mime_type", "").startswith("image/"):
                 process_image(chat_id, doc["file_id"], from_name)
             else:
                 send_message(chat_id, "⚠️ Please send images only (JPG/PNG).")
@@ -285,22 +300,18 @@ def webhook():
             if text == "/start":
                 send_message(chat_id,
                     "*Nalanda Doc Scanner Bot* 📄\n\n"
-                    "Send me any business document photo and I will:\n"
-                    "• Identify the document type\n"
-                    "• Extract all fields\n"
-                    "• Save to Notion automatically\n\n"
-                    "Just send a photo to get started! 📷"
-                )
-            elif text == "/help":
-                send_message(chat_id,
-                    "*Commands:*\n/start — Welcome\n/help — Help\n/status — Status"
+                    "Send me any document photo:\n"
+                    "• Bharathi Tax Invoice\n"
+                    "• Delivery Challan\n"
+                    "• Weighment Slip\n\n"
+                    "I will extract all fields and save to the correct sheet automatically! 📊"
                 )
             elif text == "/status":
                 send_message(chat_id,
                     "*Bot Status*\n"
                     "Claude API: " + ("✅" if CLAUDE_API_KEY else "❌") + "\n"
-                    "Notion: " + ("✅" if NOTION_TOKEN else "❌") + "\n"
-                    "Database ID: " + (NOTION_DB_ID[:8] + "..." if NOTION_DB_ID else "❌")
+                    "Google Sheets: " + ("✅" if SPREADSHEET_ID else "❌") + "\n"
+                    "Credentials: " + ("✅" if GOOGLE_CREDS else "❌")
                 )
     except Exception as e:
         print("Webhook error:", str(e), flush=True)
