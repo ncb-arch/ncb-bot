@@ -22,66 +22,107 @@ print("CLAUDE set:", bool(CLAUDE_API_KEY), flush=True)
 print("SHEETS set:", bool(SPREADSHEET_ID), flush=True)
 print("CREDS set:", bool(GOOGLE_CREDS), flush=True)
 
-# Sheet routing by doc type
-SHEET_MAP = {
-    "DELIVERY_CHALLAN":  "Delivery Challans",
-    "WEIGH_SLIP":        "Weighment Slips",
-    "TAX_INVOICE":       "Bharathi Invoices",
-    "PURCHASE_INVOICE":  "Bharathi Invoices",
-    "SALES_INVOICE":     "Bharathi Invoices",
-    "RECEIPT":           "Receipts",
-    "PURCHASE_ORDER":    "Purchase Orders",
-    "CREDIT_NOTE":       "Bharathi Invoices",
-    "DEBIT_NOTE":        "Bharathi Invoices",
-    "OTHER":             "Other Documents",
-}
+# ── Sheet names ────────────────────────────────────────
+SHEET_NALANDA   = "Nalanda Weighment Slips"
+SHEET_DELIVERY  = "Delivery Challans"
+SHEET_MR        = "MR Enterprises"
+SHEET_BHARATHI  = "Bharathi Invoices"
 
-# Column headers per sheet
-SHEET_HEADERS = {
-    "Delivery Challans": [
-        "Scanned At", "Received From", "Confidence",
-        "Invoice Number", "Invoice Date", "Supplier Name",
-        "Supplier GSTIN", "Buyer Name", "Vehicle Number",
-        "Material", "Quantity TO", "Unit Price",
-        "Basic Amount", "CGST", "SGST", "Total Amount"
+# ── Headers per sheet ──────────────────────────────────
+HEADERS = {
+    SHEET_NALANDA: [
+        "Scanned At", "Received From",
+        "RST No", "Date", "Time In", "Time Out",
+        "Vehicle No", "Material",
+        "Gross Wt (Kg)", "Tare Wt (Kg)", "Net Wt (Kg)"
     ],
-    "Weighment Slips": [
-        "Scanned At", "Received From", "Confidence",
-        "RST Number", "Date", "Time",
-        "Vehicle Number", "Material",
-        "Gross Weight Kg", "Tare Weight Kg", "Net Weight Kg"
+    SHEET_DELIVERY: [
+        "Scanned At", "Received From",
+        "Trip Sheet No", "Date", "Time",
+        "Customer Name", "Vehicle No",
+        "Material / Block Size", "Quantity",
+        "Delivery Address", "Amount"
     ],
-    "Bharathi Invoices": [
-        "Scanned At", "Received From", "Confidence", "Doc Type",
-        "Invoice Number", "Invoice Date", "Supplier Name",
-        "Supplier GSTIN", "Buyer Name", "Vehicle Number",
-        "Gross Weight Kg", "Tare Weight Kg", "Net Weight Kg",
-        "Material", "Quantity TO", "Unit Price",
-        "Basic Amount", "CGST", "SGST", "Total Amount"
+    SHEET_MR: [
+        "Scanned At", "Received From",
+        "MR Trip No", "Date", "Vehicle No", "Material",
+        "MR Net Wt (Kg)", "Nalanda Net Wt (Kg)", "Difference (Kg)",
+        "Rate", "Amount"
+    ],
+    SHEET_BHARATHI: [
+        "Scanned At", "Received From",
+        "Invoice No", "Invoice Date", "Vehicle No", "Material",
+        "Bharathi Gross Wt (Kg)", "Bharathi Tare Wt (Kg)", "Bharathi Net Wt (Kg)",
+        "Nalanda RST No", "Nalanda Gross Wt (Kg)", "Nalanda Tare Wt (Kg)", "Nalanda Net Wt (Kg)",
+        "Difference (Kg)",
+        "Basic Price/TO", "Basic Amount", "CGST", "SGST", "Total Amount"
     ],
 }
 
-DOC_TYPES = {
-    "TAX_INVOICE": "Tax Invoice",
-    "PURCHASE_INVOICE": "Purchase Invoice",
-    "SALES_INVOICE": "Sales Invoice",
-    "DELIVERY_CHALLAN": "Delivery Challan",
-    "WEIGH_SLIP": "Weigh Slip",
-    "RECEIPT": "Receipt",
-    "PURCHASE_ORDER": "Purchase Order",
-    "CREDIT_NOTE": "Credit Note",
-    "DEBIT_NOTE": "Debit Note",
-    "OTHER": "Other"
+# ── Claude prompt ──────────────────────────────────────
+PROMPT = """You are a document scanner for Nalanda Concrete Blocks, Bengaluru.
+
+This image may contain one or more of these document types:
+1. NALANDA_WEIGH_SLIP - Nalanda Concrete Blocks weighment slip (RST number, Gross/Tare/Net weights)
+2. DELIVERY_CHALLAN - Nalanda Concrete Blocks Delivery Trip Sheet (block delivery to customer)
+3. MR_ENTERPRISES - M.R. Enterprises trip sheet (pink form) — may also have a Nalanda weigh slip in same image
+4. BHARATHI_INVOICE - Bharathi Rock Products tax invoice/delivery challan — may also have a Nalanda weigh slip in same image
+
+Identify the PRIMARY document type and extract ALL visible fields from ALL documents in the image.
+
+Return ONLY valid JSON, no markdown:
+{
+  "primary_doc": "BHARATHI_INVOICE",
+  "confidence": "HIGH",
+  "bharathi": {
+    "invoice_number": "",
+    "invoice_date": "",
+    "vehicle_number": "",
+    "material": "",
+    "gross_wt_kg": "",
+    "tare_wt_kg": "",
+    "net_wt_kg": "",
+    "basic_price_per_to": "",
+    "basic_amount": "",
+    "cgst": "",
+    "sgst": "",
+    "total_amount": ""
+  },
+  "nalanda_slip": {
+    "rst_number": "",
+    "date": "",
+    "time_in": "",
+    "time_out": "",
+    "vehicle_number": "",
+    "material": "",
+    "gross_wt_kg": "",
+    "tare_wt_kg": "",
+    "net_wt_kg": ""
+  },
+  "mr_enterprises": {
+    "trip_number": "",
+    "date": "",
+    "vehicle_number": "",
+    "material": "",
+    "net_wt_kg": "",
+    "rate": "",
+    "amount": ""
+  },
+  "delivery_challan": {
+    "trip_sheet_number": "",
+    "date": "",
+    "time": "",
+    "customer_name": "",
+    "vehicle_number": "",
+    "material_block_size": "",
+    "quantity": "",
+    "delivery_address": "",
+    "amount": ""
+  }
 }
 
-PROMPT = """You are a business document scanner for Nalanda Concrete Blocks, Bengaluru, India.
-Analyse this document image and respond ONLY with valid JSON, no markdown, no extra text.
-Identify document type from: TAX_INVOICE, DELIVERY_CHALLAN, WEIGH_SLIP, PURCHASE_INVOICE,
-SALES_INVOICE, RECEIPT, PURCHASE_ORDER, CREDIT_NOTE, DEBIT_NOTE, OTHER.
-Extract all visible fields like invoice_number, invoice_date, supplier_name, supplier_gstin,
-buyer_name, vehicle_number, gross_weight_kg, tare_weight_kg, net_weight_kg, material,
-quantity_to, unit_price, basic_amount, cgst, sgst, total_amount, rst_number, date, time.
-Return ONLY this JSON: {"doc_type":"TAX_INVOICE","confidence":"HIGH","fields":{"key":"value"}}"""
+Only populate sections relevant to what is visible in the image. Leave other sections as empty strings.
+For BHARATHI_INVOICE and MR_ENTERPRISES, always check if a Nalanda weigh slip is also present and extract it too."""
 
 
 def get_gspread_client():
@@ -94,15 +135,35 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
-def send_message(chat_id, text, parse_mode="Markdown"):
-    print("Sending to:", chat_id, flush=True)
+def get_or_create_sheet(spreadsheet, sheet_name):
     try:
-        r = requests.post(TELEGRAM_API + "/sendMessage", json={
+        sheet = spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(title=sheet_name, rows=2000, cols=30)
+        headers = HEADERS.get(sheet_name, ["Scanned At", "Received From"])
+        sheet.append_row(headers)
+        sheet.format("1:1", {
+            "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
+            "textFormat": {
+                "bold": True,
+                "foregroundColor": {"red": 1, "green": 1, "blue": 1}
+            }
+        })
+        print("Created sheet:", sheet_name, flush=True)
+    return sheet
+
+
+def safe(d, key):
+    return str(d.get(key, "") or "")
+
+
+def send_message(chat_id, text, parse_mode="Markdown"):
+    try:
+        requests.post(TELEGRAM_API + "/sendMessage", json={
             "chat_id": chat_id,
             "text": text,
             "parse_mode": parse_mode
         }, timeout=10)
-        print("Send result:", r.status_code, flush=True)
     except Exception as e:
         print("Send error:", str(e), flush=True)
 
@@ -130,7 +191,7 @@ def analyse_with_claude(image_b64):
         },
         json={
             "model": "claude-sonnet-4-5",
-            "max_tokens": 1000,
+            "max_tokens": 1500,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -152,107 +213,102 @@ def analyse_with_claude(image_b64):
     return json.loads(raw)
 
 
+def calc_diff(val1, val2):
+    try:
+        return str(int(float(val1)) - int(float(val2)))
+    except:
+        return ""
+
+
 def save_to_sheets(extracted, from_name):
     if not SPREADSHEET_ID or not GOOGLE_CREDS:
-        print("Sheets not configured", flush=True)
-        return False
+        return []
     try:
         gc = get_gspread_client()
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-        doc_type = extracted.get("doc_type", "OTHER")
-        sheet_name = SHEET_MAP.get(doc_type, "Other Documents")
-        fields = extracted.get("fields", {})
         ts = datetime.now().strftime("%d/%m/%Y %H:%M")
+        saved_sheets = []
+        doc_type = extracted.get("primary_doc", "")
 
-        # Get or create the sheet tab
-        try:
-            sheet = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            sheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=26)
-            # Add headers
-            headers = SHEET_HEADERS.get(sheet_name, ["Scanned At", "Received From", "Doc Type", "Confidence"])
-            sheet.append_row(headers)
-            # Format header row
-            sheet.format("1:1", {
-                "backgroundColor": {"red": 0.12, "green": 0.31, "blue": 0.47},
-                "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}
-            })
+        b  = extracted.get("bharathi", {})
+        n  = extracted.get("nalanda_slip", {})
+        mr = extracted.get("mr_enterprises", {})
+        dc = extracted.get("delivery_challan", {})
 
-        # Build row based on sheet headers
-        headers = SHEET_HEADERS.get(sheet_name, [])
-        if headers:
-            # Map field names to header names
-            field_to_header = {
-                "invoice_number": "Invoice Number",
-                "invoice_date":   "Invoice Date",
-                "supplier_name":  "Supplier Name",
-                "supplier_gstin": "Supplier GSTIN",
-                "buyer_name":     "Buyer Name",
-                "vehicle_number": "Vehicle Number",
-                "gross_weight_kg":"Gross Weight Kg",
-                "tare_weight_kg": "Tare Weight Kg",
-                "net_weight_kg":  "Net Weight Kg",
-                "material":       "Material",
-                "quantity_to":    "Quantity TO",
-                "unit_price":     "Unit Price",
-                "basic_amount":   "Basic Amount",
-                "cgst":           "CGST",
-                "sgst":           "SGST",
-                "total_amount":   "Total Amount",
-                "rst_number":     "RST Number",
-                "date":           "Date",
-                "time":           "Time",
-            }
-            # Build lookup by header name
-            data_map = {
-                "Scanned At":    ts,
-                "Received From": from_name,
-                "Confidence":    extracted.get("confidence", ""),
-                "Doc Type":      DOC_TYPES.get(doc_type, doc_type),
-            }
-            for field_key, header_name in field_to_header.items():
-                if field_key in fields:
-                    data_map[header_name] = str(fields[field_key])
+        # ── NALANDA WEIGH SLIP only ────────────────────
+        if doc_type == "NALANDA_WEIGH_SLIP":
+            sheet = get_or_create_sheet(spreadsheet, SHEET_NALANDA)
+            row = [
+                ts, from_name,
+                safe(n, "rst_number"), safe(n, "date"),
+                safe(n, "time_in"), safe(n, "time_out"),
+                safe(n, "vehicle_number"), safe(n, "material"),
+                safe(n, "gross_wt_kg"), safe(n, "tare_wt_kg"), safe(n, "net_wt_kg")
+            ]
+            sheet.append_row(row)
+            saved_sheets.append(SHEET_NALANDA)
 
-            row = [data_map.get(h, "") for h in headers]
-        else:
-            row = [ts, from_name, DOC_TYPES.get(doc_type, doc_type), extracted.get("confidence", "")] + list(fields.values())
+        # ── DELIVERY CHALLAN ───────────────────────────
+        elif doc_type == "DELIVERY_CHALLAN":
+            sheet = get_or_create_sheet(spreadsheet, SHEET_DELIVERY)
+            row = [
+                ts, from_name,
+                safe(dc, "trip_sheet_number"), safe(dc, "date"), safe(dc, "time"),
+                safe(dc, "customer_name"), safe(dc, "vehicle_number"),
+                safe(dc, "material_block_size"), safe(dc, "quantity"),
+                safe(dc, "delivery_address"), safe(dc, "amount")
+            ]
+            sheet.append_row(row)
+            saved_sheets.append(SHEET_DELIVERY)
 
-        sheet.append_row(row)
-        print("Saved to sheet:", sheet_name, flush=True)
-        return sheet_name
+        # ── MR ENTERPRISES + Nalanda slip ─────────────
+        elif doc_type == "MR_ENTERPRISES":
+            sheet = get_or_create_sheet(spreadsheet, SHEET_MR)
+            mr_net  = safe(mr, "net_wt_kg")
+            nal_net = safe(n, "net_wt_kg")
+            diff    = calc_diff(mr_net, nal_net)
+            row = [
+                ts, from_name,
+                safe(mr, "trip_number"), safe(mr, "date"),
+                safe(mr, "vehicle_number"), safe(mr, "material"),
+                mr_net, nal_net, diff,
+                safe(mr, "rate"), safe(mr, "amount")
+            ]
+            sheet.append_row(row)
+            saved_sheets.append(SHEET_MR)
+
+        # ── BHARATHI INVOICE + Nalanda slip ───────────
+        elif doc_type == "BHARATHI_INVOICE":
+            sheet = get_or_create_sheet(spreadsheet, SHEET_BHARATHI)
+            bh_net  = safe(b, "net_wt_kg")
+            nal_net = safe(n, "net_wt_kg")
+            diff    = calc_diff(bh_net, nal_net)
+            row = [
+                ts, from_name,
+                safe(b, "invoice_number"), safe(b, "invoice_date"),
+                safe(b, "vehicle_number"), safe(b, "material"),
+                safe(b, "gross_wt_kg"), safe(b, "tare_wt_kg"), bh_net,
+                safe(n, "rst_number"),
+                safe(n, "gross_wt_kg"), safe(n, "tare_wt_kg"), nal_net,
+                diff,
+                safe(b, "basic_price_per_to"), safe(b, "basic_amount"),
+                safe(b, "cgst"), safe(b, "sgst"), safe(b, "total_amount")
+            ]
+            sheet.append_row(row)
+            saved_sheets.append(SHEET_BHARATHI)
+
+        print("Saved to:", saved_sheets, flush=True)
+        return saved_sheets
+
     except Exception as e:
         print("Sheets error:", str(e), flush=True)
-        return False
+        return []
 
 
-def format_reply(extracted, saved):
-    label = DOC_TYPES.get(extracted["doc_type"], extracted["doc_type"])
-    confidence = extracted.get("confidence", "")
-    fields = extracted.get("fields", {})
-    total = fields.get("total_amount", fields.get("net_weight_kg", ""))
-    supplier = fields.get("supplier_name", fields.get("company", ""))
-    inv_num = fields.get("invoice_number", fields.get("rst_number", ""))
-    lines = ["*" + label + "* — " + confidence + " confidence"]
-    if inv_num:
-        lines.append("No: `" + str(inv_num) + "`")
-    if supplier:
-        lines.append("From: " + str(supplier))
-    if total:
-        lines.append("Amount/Wt: *" + str(total) + "*")
-    lines.append("")
-    lines.append("*Extracted fields:*")
-    for k, v in list(fields.items())[:8]:
-        lines.append("• " + k.replace("_", " ").title() + ": `" + str(v) + "`")
-    if len(fields) > 8:
-        lines.append("_...and " + str(len(fields)-8) + " more fields_")
-    lines.append("")
-    if saved:
-        lines.append("✅ Saved to *" + str(saved) + "* sheet")
-    else:
-        lines.append("⚠️ Could not save to Sheets")
-    return "\n".join(lines)
-
+def format_reply(extracted, saved_sheets):
+    if saved_sheets:
+        return "✅ Saved to *" + ", ".join(saved_sheets) + "*"
+    return "⚠️ Could not save to Sheets — check logs"
 
 def process_image(chat_id, file_id, from_name):
     send_message(chat_id, "⏳ Reading document...")
@@ -263,6 +319,7 @@ def process_image(chat_id, file_id, from_name):
             return
         image_b64 = download_image(file_url)
         extracted = analyse_with_claude(image_b64)
+        print("Extracted:", json.dumps(extracted)[:300], flush=True)
         saved = save_to_sheets(extracted, from_name)
         reply = format_reply(extracted, saved)
         send_message(chat_id, reply)
@@ -281,30 +338,30 @@ def webhook():
         message = data.get("message", {})
         chat_id = message.get("chat", {}).get("id")
         from_user = message.get("from", {})
-        from_name = (from_user.get("first_name", "") + " " + from_user.get("last_name", "")).strip()
+        from_name = (from_user.get("first_name","") + " " + from_user.get("last_name","")).strip()
         from_name = from_name or from_user.get("username", "Unknown")
-        print("From:", from_name, "Chat:", chat_id, flush=True)
 
         if "photo" in message:
             file_id = message["photo"][-1]["file_id"]
             process_image(chat_id, file_id, from_name)
         elif "document" in message:
             doc = message["document"]
-            if doc.get("mime_type", "").startswith("image/"):
+            if doc.get("mime_type","").startswith("image/"):
                 process_image(chat_id, doc["file_id"], from_name)
             else:
                 send_message(chat_id, "⚠️ Please send images only (JPG/PNG).")
         elif "text" in message:
             text = message["text"].strip()
-            print("Text:", text, flush=True)
             if text == "/start":
                 send_message(chat_id,
                     "*Nalanda Doc Scanner Bot* 📄\n\n"
                     "Send me any document photo:\n"
-                    "• Bharathi Tax Invoice\n"
-                    "• Delivery Challan\n"
-                    "• Weighment Slip\n\n"
-                    "I will extract all fields and save to the correct sheet automatically! 📊"
+                    "• 📋 Bharathi Tax Invoice\n"
+                    "• ⚖️ Nalanda Weighment Slip\n"
+                    "• 🚛 Delivery Challan\n"
+                    "• 📝 MR Enterprises Trip Sheet\n\n"
+                    "I extract all fields and save to the correct sheet automatically!\n"
+                    "For Bharathi and MR invoices, include the Nalanda slip in the same photo for automatic difference calculation. 📊"
                 )
             elif text == "/status":
                 send_message(chat_id,
