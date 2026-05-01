@@ -4,20 +4,21 @@ import json
 import base64
 import requests
 from flask import Flask, request
+from datetime import datetime
 
 app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
-SHEET_PREFIX = os.environ.get("SHEET_PREFIX", "Nalanda")
+NOTION_TOKEN   = os.environ.get("NOTION_TOKEN", "")
+NOTION_DB_ID   = os.environ.get("NOTION_DB_ID", "")
 
 TELEGRAM_API = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
 
 print("Bot starting...", flush=True)
 print("TOKEN set:", bool(TELEGRAM_TOKEN), flush=True)
 print("CLAUDE set:", bool(CLAUDE_API_KEY), flush=True)
-print("SHEETS set:", bool(APPS_SCRIPT_URL), flush=True)
+print("NOTION set:", bool(NOTION_TOKEN), flush=True)
 
 DOC_TYPES = {
     "TAX_INVOICE": "Tax Invoice",
@@ -60,8 +61,7 @@ def get_file_url(file_id):
     data = res.json()
     if not data.get("ok"):
         return None
-    file_path = data["result"]["file_path"]
-    return "https://api.telegram.org/file/bot" + TELEGRAM_TOKEN + "/" + file_path
+    return "https://api.telegram.org/file/bot" + TELEGRAM_TOKEN + "/" + data["result"]["file_path"]
 
 
 def download_image(url):
@@ -101,25 +101,112 @@ def analyse_with_claude(image_b64):
     return json.loads(raw)
 
 
-def save_to_sheets(extracted, from_user):
-    if not APPS_SCRIPT_URL:
+def save_to_notion(extracted, from_name):
+    if not NOTION_TOKEN or not NOTION_DB_ID:
+        print("Notion not configured", flush=True)
         return False
+
     label = DOC_TYPES.get(extracted["doc_type"], extracted["doc_type"])
-    sheet_name = SHEET_PREFIX + " - " + label
     fields = extracted.get("fields", {})
-    headers = ["Received From", "Doc Type", "Confidence"] + [
-        k.replace("_", " ").title() for k in fields.keys()
-    ]
-    row = [from_user, label, extracted.get("confidence", "")] + list(fields.values())
+
+    # Build title from best available field
+    title = (
+        fields.get("invoice_number") or
+        fields.get("rst_number") or
+        fields.get("vehicle_number") or
+        label + " - " + datetime.now().strftime("%d/%m/%Y %H:%M")
+    )
+
+    # Core properties
+    properties = {
+        "Name": {
+            "title": [{"text": {"content": str(title)}}]
+        },
+        "Doc Type": {
+            "select": {"name": label}
+        },
+        "Confidence": {
+            "select": {"name": extracted.get("confidence", "MEDIUM")}
+        },
+        "Received From": {
+            "rich_text": [{"text": {"content": from_name}}]
+        },
+        "Scanned At": {
+            "date": {"start": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}
+        }
+    }
+
+    # Add extracted fields as rich_text properties
+    # Map common fields to Notion properties
+    field_map = {
+        "invoice_number":   "Invoice Number",
+        "invoice_date":     "Invoice Date",
+        "supplier_name":    "Supplier",
+        "buyer_name":       "Buyer",
+        "vehicle_number":   "Vehicle Number",
+        "net_weight_kg":    "Net Weight (Kg)",
+        "gross_weight_kg":  "Gross Weight (Kg)",
+        "tare_weight_kg":   "Tare Weight (Kg)",
+        "total_amount":     "Total Amount",
+        "basic_amount":     "Basic Amount",
+        "cgst":             "CGST",
+        "sgst":             "SGST",
+        "material":         "Material",
+        "rst_number":       "RST Number",
+        "quantity_to":      "Quantity (TO)",
+        "supplier_gstin":   "Supplier GSTIN",
+    }
+
+    for field_key, notion_key in field_map.items():
+        if field_key in fields and fields[field_key]:
+            properties[notion_key] = {
+                "rich_text": [{"text": {"content": str(fields[field_key])}}]
+            }
+
+    # Add any remaining fields as a notes block
+    extra = {k: v for k, v in fields.items() if k not in field_map}
+
+    payload = {
+        "parent": {"database_id": NOTION_DB_ID},
+        "properties": properties
+    }
+
+    # Add extra fields as page content
+    if extra:
+        payload["children"] = [{
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{
+                    "text": {
+                        "content": "Additional fields:\n" + "\n".join(
+                            k.replace("_", " ").title() + ": " + str(v)
+                            for k, v in extra.items()
+                        )
+                    }
+                }]
+            }
+        }]
+
     try:
-        requests.post(APPS_SCRIPT_URL, json={
-            "sheetName": sheet_name,
-            "headers": headers,
-            "row": row
-        }, timeout=15)
-        return True
+        res = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers={
+                "Authorization": "Bearer " + NOTION_TOKEN,
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28"
+            },
+            json=payload,
+            timeout=15
+        )
+        print("Notion response:", res.status_code, flush=True)
+        if res.status_code == 200:
+            return True
+        else:
+            print("Notion error:", res.text[:300], flush=True)
+            return False
     except Exception as e:
-        print("Sheets error:", str(e), flush=True)
+        print("Notion exception:", str(e), flush=True)
         return False
 
 
@@ -144,7 +231,7 @@ def format_reply(extracted, saved):
     if len(fields) > 8:
         lines.append("_...and " + str(len(fields)-8) + " more fields_")
     lines.append("")
-    lines.append("✅ Saved to Google Sheets" if saved else "⚠️ Could not save to Sheets")
+    lines.append("✅ Saved to Notion" if saved else "⚠️ Could not save to Notion — check logs")
     return "\n".join(lines)
 
 
@@ -157,7 +244,7 @@ def process_image(chat_id, file_id, from_name):
             return
         image_b64 = download_image(file_url)
         extracted = analyse_with_claude(image_b64)
-        saved = save_to_sheets(extracted, from_name)
+        saved = save_to_notion(extracted, from_name)
         reply = format_reply(extracted, saved)
         send_message(chat_id, reply)
     except Exception as e:
@@ -201,7 +288,7 @@ def webhook():
                     "Send me any business document photo and I will:\n"
                     "• Identify the document type\n"
                     "• Extract all fields\n"
-                    "• Save to Google Sheets automatically\n\n"
+                    "• Save to Notion automatically\n\n"
                     "Just send a photo to get started! 📷"
                 )
             elif text == "/help":
@@ -212,8 +299,8 @@ def webhook():
                 send_message(chat_id,
                     "*Bot Status*\n"
                     "Claude API: " + ("✅" if CLAUDE_API_KEY else "❌") + "\n"
-                    "Google Sheets: " + ("✅" if APPS_SCRIPT_URL else "❌") + "\n"
-                    "Sheet prefix: " + SHEET_PREFIX
+                    "Notion: " + ("✅" if NOTION_TOKEN else "❌") + "\n"
+                    "Database ID: " + (NOTION_DB_ID[:8] + "..." if NOTION_DB_ID else "❌")
                 )
     except Exception as e:
         print("Webhook error:", str(e), flush=True)
