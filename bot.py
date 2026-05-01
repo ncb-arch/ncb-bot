@@ -37,16 +37,16 @@ HEADERS = {
         "Gross Wt (Kg)", "Tare Wt (Kg)", "Net Wt (Kg)"
     ],
     SHEET_DELIVERY: [
-        "Scanned At", "Received From",
-        "Trip Sheet No", "Date", "Time",
-        "Customer Name", "Vehicle No",
-        "Material / Block Size", "Quantity",
-        "Delivery Address", "Amount"
+        "Date", "Vehicle No", "Driver Name", "Invoice Number",
+        "DC No", "8 Inch", "6 Inch", "4 Inch",
+        "Order By", "Phone No", "Area", "Company Name"
     ],
     SHEET_MR: [
         "Scanned At", "Received From",
         "MR Trip No", "Date", "Vehicle No", "Material",
-        "MR Net Wt (Kg)", "Nalanda Net Wt (Kg)", "Difference (Kg)",
+        "MR Gross Wt (Kg)", "MR Tare Wt (Kg)", "MR Net Wt (Kg)",
+        "Nalanda Gross Wt (Kg)", "Nalanda Tare Wt (Kg)", "Nalanda Net Wt (Kg)",
+        "Gross Diff (Kg)", "Tare Diff (Kg)", "Net Diff (Kg)",
         "Rate", "Amount"
     ],
     SHEET_BHARATHI: [
@@ -104,6 +104,8 @@ Return ONLY valid JSON, no markdown:
     "date": "",
     "vehicle_number": "",
     "material": "",
+    "gross_wt_kg": "",
+    "tare_wt_kg": "",
     "net_wt_kg": "",
     "rate": "",
     "amount": ""
@@ -111,13 +113,16 @@ Return ONLY valid JSON, no markdown:
   "delivery_challan": {
     "trip_sheet_number": "",
     "date": "",
-    "time": "",
-    "customer_name": "",
     "vehicle_number": "",
-    "material_block_size": "",
-    "quantity": "",
-    "delivery_address": "",
-    "amount": ""
+    "driver_name": "",
+    "invoice_number": "",
+    "qty_8_inch": "",
+    "qty_6_inch": "",
+    "qty_4_inch": "",
+    "order_by": "",
+    "phone_number": "",
+    "area": "",
+    "company_name": ""
   }
 }
 
@@ -251,12 +256,21 @@ def save_to_sheets(extracted, from_name):
         # ── DELIVERY CHALLAN ───────────────────────────
         elif doc_type == "DELIVERY_CHALLAN":
             sheet = get_or_create_sheet(spreadsheet, SHEET_DELIVERY)
+            raw_date = safe(dc, "date")
+            try:
+                from datetime import datetime as dt
+                parsed = dt.strptime(raw_date.strip(), "%d/%m/%Y")
+                short_date = parsed.strftime("%-d-%b")
+            except:
+                short_date = raw_date
             row = [
-                ts, from_name,
-                safe(dc, "trip_sheet_number"), safe(dc, "date"), safe(dc, "time"),
-                safe(dc, "customer_name"), safe(dc, "vehicle_number"),
-                safe(dc, "material_block_size"), safe(dc, "quantity"),
-                safe(dc, "delivery_address"), safe(dc, "amount")
+                short_date,
+                safe(dc, "vehicle_number"), safe(dc, "driver_name"),
+                safe(dc, "invoice_number"),
+                safe(dc, "trip_sheet_number"),
+                safe(dc, "qty_8_inch"), safe(dc, "qty_6_inch"), safe(dc, "qty_4_inch"),
+                safe(dc, "order_by"), safe(dc, "phone_number"),
+                safe(dc, "area"), safe(dc, "company_name")
             ]
             sheet.append_row(row)
             saved_sheets.append(SHEET_DELIVERY)
@@ -264,14 +278,21 @@ def save_to_sheets(extracted, from_name):
         # ── MR ENTERPRISES + Nalanda slip ─────────────
         elif doc_type == "MR_ENTERPRISES":
             sheet = get_or_create_sheet(spreadsheet, SHEET_MR)
-            mr_net  = safe(mr, "net_wt_kg")
-            nal_net = safe(n, "net_wt_kg")
-            diff    = calc_diff(mr_net, nal_net)
+            mr_gross  = safe(mr, "gross_wt_kg")
+            mr_tare   = safe(mr, "tare_wt_kg")
+            mr_net    = safe(mr, "net_wt_kg")
+            nal_gross = safe(n, "gross_wt_kg")
+            nal_tare  = safe(n, "tare_wt_kg")
+            nal_net   = safe(n, "net_wt_kg")
             row = [
                 ts, from_name,
                 safe(mr, "trip_number"), safe(mr, "date"),
                 safe(mr, "vehicle_number"), safe(mr, "material"),
-                mr_net, nal_net, diff,
+                mr_gross, mr_tare, mr_net,
+                nal_gross, nal_tare, nal_net,
+                calc_diff(mr_gross, nal_gross),
+                calc_diff(mr_tare, nal_tare),
+                calc_diff(mr_net, nal_net),
                 safe(mr, "rate"), safe(mr, "amount")
             ]
             sheet.append_row(row)
@@ -340,6 +361,14 @@ def webhook():
         from_user = message.get("from", {})
         from_name = (from_user.get("first_name","") + " " + from_user.get("last_name","")).strip()
         from_name = from_name or from_user.get("username", "Unknown")
+
+        # Whitelist check
+        allowed = os.environ.get("ALLOWED_IDS", "")
+        if allowed:
+            allowed_ids = [x.strip() for x in allowed.split(",")]
+            if str(from_user.get("id", "")) not in allowed_ids:
+                send_message(chat_id, "⛔ Access denied. Contact Nalanda admin to get access.")
+                return "ok"
 
         if "photo" in message:
             file_id = message["photo"][-1]["file_id"]
