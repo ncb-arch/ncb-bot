@@ -1,0 +1,9 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "gunicorn bot:app",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
