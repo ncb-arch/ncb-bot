@@ -328,7 +328,17 @@ def save_to_sheets(extracted, from_name):
 
 def format_reply(extracted, saved_sheets):
     if saved_sheets:
-        return "✅ Saved to *" + ", ".join(saved_sheets) + "*"
+        doc_type = extracted.get("primary_doc", "")
+        rst = ""
+        if doc_type == "NALANDA_WEIGH_SLIP":
+            rst = safe(extracted.get("nalanda_slip", {}), "rst_number")
+        elif doc_type in ("BHARATHI_INVOICE", "MR_ENTERPRISES"):
+            rst = safe(extracted.get("nalanda_slip", {}), "rst_number")
+
+        msg = "✅ Saved to *" + ", ".join(saved_sheets) + "*"
+        if rst:
+            msg += "\n📋 RST No: *" + rst + "*"
+        return msg
     return "⚠️ Could not save to Sheets — check logs"
 
 def process_image(chat_id, file_id, from_name):
